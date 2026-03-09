@@ -1,0 +1,23 @@
+# catalyst.yaml — Catalyst deployment configuration
+# https://docs.catalyst.anthropic.com
+
+name: rm-analysis-tool
+
+services:
+  # Flask API + SPA host
+  backend:
+    type: web
+    runtime: python
+    build:
+      # 1. Install Python deps
+      # 2. Build the React frontend
+      # 3. Flask serves the built dist/ as static files
+      commands:
+        - pip install -r backend/requirements.txt
+        - cd frontend && npm ci && npm run build
+    start: gunicorn --chdir backend app:app --bind 0.0.0.0:$PORT --workers 2
+    env:
+      FLASK_ENV: production
+      # DB_PATH defaults to ./analyses.db inside the backend directory.
+      # Override with a persistent volume path if Catalyst supports volumes,
+      # e.g. DB_PATH: /data/analyses.db
