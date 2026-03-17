@@ -9,9 +9,8 @@ from datetime import datetime
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
 CORS(app)
 
-
-# ── Database setup ─────────────────────────────────────────────────────────────
-DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "analyses.db"))
+DB_PATH = os.environ.get("DB_PATH",
+          os.path.join(os.path.dirname(__file__), "analyses.db"))
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -25,573 +24,814 @@ def init_db():
             id        TEXT PRIMARY KEY,
             name      TEXT NOT NULL,
             saved_at  TEXT NOT NULL,
+            is_draft  INTEGER NOT NULL DEFAULT 0,
             data      TEXT NOT NULL
         )
     """)
+    try:
+        conn.execute("ALTER TABLE analyses ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
 init_db()
 
-
-# ── Analysis CRUD (all under /api/ prefix) ─────────────────────────────────────
-
 @app.route("/api/analyses", methods=["GET"])
 def list_analyses():
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, name, saved_at FROM analyses ORDER BY saved_at DESC"
+        "SELECT id, name, saved_at, is_draft FROM analyses ORDER BY saved_at DESC"
     ).fetchall()
     conn.close()
-    return jsonify([
-        {"id": r["id"], "name": r["name"], "savedAt": r["saved_at"]}
-        for r in rows
-    ])
-
+    return jsonify([{"id": r["id"], "name": r["name"],
+                     "savedAt": r["saved_at"], "isDraft": bool(r["is_draft"])}
+                    for r in rows])
 
 @app.route("/api/analyses", methods=["POST"])
 def save_analysis():
-    body = request.get_json()
-    aid  = body.get("id", "").strip()
-    name = body.get("name", "").strip()
-    data = body.get("data", {})
-
+    body     = request.get_json()
+    aid      = body.get("id", "").strip()
+    name     = body.get("name", "").strip()
+    data     = body.get("data", {})
+    is_draft = 1 if body.get("isDraft") else 0
     if not aid or not name:
         return jsonify({"error": "id and name are required"}), 400
-
     now = datetime.now().strftime("%b %d, %I:%M %p")
     conn = get_db()
     conn.execute("""
-        INSERT INTO analyses (id, name, saved_at, data)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO analyses (id, name, saved_at, is_draft, data)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
-            name     = excluded.name,
-            saved_at = excluded.saved_at,
-            data     = excluded.data
-    """, (aid, name, now, json.dumps(data)))
+            name=excluded.name, saved_at=excluded.saved_at,
+            is_draft=excluded.is_draft, data=excluded.data
+    """, (aid, name, now, is_draft, json.dumps(data)))
     conn.commit()
     conn.close()
-    return jsonify({"id": aid, "name": name, "savedAt": now})
-
+    return jsonify({"id": aid, "name": name, "savedAt": now, "isDraft": bool(is_draft)})
 
 @app.route("/api/analyses/<aid>", methods=["GET"])
 def load_analysis(aid):
     conn = get_db()
-    row = conn.execute(
-        "SELECT * FROM analyses WHERE id = ?", (aid,)
-    ).fetchone()
+    row  = conn.execute("SELECT * FROM analyses WHERE id=?", (aid,)).fetchone()
     conn.close()
     if not row:
         return jsonify({"error": "Not found"}), 404
-    return jsonify({
-        "id":      row["id"],
-        "name":    row["name"],
-        "savedAt": row["saved_at"],
-        "data":    json.loads(row["data"]),
-    })
-
+    return jsonify({"id": row["id"], "name": row["name"], "savedAt": row["saved_at"],
+                    "isDraft": bool(row["is_draft"]), "data": json.loads(row["data"])})
 
 @app.route("/api/analyses/<aid>", methods=["DELETE"])
 def delete_analysis(aid):
     conn = get_db()
-    conn.execute("DELETE FROM analyses WHERE id = ?", (aid,))
+    conn.execute("DELETE FROM analyses WHERE id=?", (aid,))
     conn.commit()
     conn.close()
     return jsonify({"deleted": aid})
 
 
-# ── ARGB Colors ────────────────────────────────────────────────────────────────
-CY   = "FFFFFBEB"
-CB   = "FFEFF6FF"
-CG   = "FFF0FDF4"
-CO   = "FFFFF7ED"
-CP   = "FFF5F3FF"
-CW   = "FFFFFFFF"
-CG50 = "FFF8F9FA"
-CG1  = "FFF1F3F5"
-CG8  = "FF1F2937"
-CG7  = "FF374151"
+# ─────────────────────────────────────────────────────────────
+# COLORS — only what the frontend actually uses
+# ─────────────────────────────────────────────────────────────
+# Backgrounds
+CY   = "FFFFFBEB"  # yellow  — user input cells only
+CW   = "FFFFFFFF"  # white   — all computed/data cells
+CG8  = "FF1F2937"  # dark    — section headers, group header row bg
+CG7  = "FF374151"  # mid-dark — KPI sub-label rows
+CG1  = "FFF1F3F5"  # light   — totals row bg
+CG50 = "FFF8F9FA"  # near-white — scenario input label cells
 
-FW   = "FFFFFFFF"
-FDK  = "FF111827"
-FG6  = "FF4B5563"
-FBL  = "FF1D4ED8"
-FGR  = "FF15803D"
-FOR  = "FFC2410C"
-FRD  = "FFDC2626"
-FPU  = "FF6D28D9"
-FYL  = "FF92400E"
+# Text colors
+FW   = "FFFFFFFF"  # white (on dark bg)
+FDK  = "FF111827"  # near-black — default data text
+FG5  = "FF6B7280"  # grey — subtitles
+FG4  = "FF9CA3AF"  # lighter grey
+FYL  = "FFFCD34D"  # amber-brown — yellow input values & "VENDOR INPUTS" label
+FGR  = "FF15803D"  # green — "RECIPE"/"COST" label + green values
+FTEAL= "FF5EEAD4"  # teal — "COST" group label
+FOR_ = "FFC2410C"  # orange — "MOQ REFERENCE" label
+FPU  = "FF6D28D9"  # purple — "ANCHOR ANALYSIS" label
+FRD  = "FFDC2626"  # red — "ELIG." label + negative/risk values
+FBL  = "FF1D4ED8"  # blue — blue values (Min MOQ Cost card etc.)
+FAMB = "FFD97706"  # amber — pct-sum highlight
+
+# Number format strings
+NF_INT   = "#,##0"
+NF_DEC2  = "#,##0.00"
+NF_DEC3  = "#,##0.000"
+NF_PCT   = "0.00%"
+NF_PCT1  = "0.0%"
+NF_G1    = '#,##0.0" g"'
+NF_G2    = '#,##0.00" g"'
+NF_D2    = '"$"#,##0.00'
+NF_D4    = '"$"#,##0.0000'
+NF_D6    = '"$"#,##0.000000'
+NF_UNITS = '#,##0 "units"'
+# Delta: RED when positive (costs more = bad), GREEN when negative (costs less = good), dash for zero
+NF_DELTA_G = '[Red]"+$"#,##0.000000;[Green]"-$"#,##0.000000;"-"'
+NF_DELTA_U = '[Red]"+$"#,##0.0000;[Green]"-$"#,##0.0000;"-"'
 
 
-def fill(c):
-    return PatternFill("solid", fgColor=c)
-
-def font(bold=False, size=11, color=FDK):
-    return Font(name="Calibri", size=size, bold=bold, color=color)
-
-def align(h="left", wrap=True):
-    valid = {"left","right","center","fill","justify","general","centerContinuous","distributed"}
-    return Alignment(horizontal=h if h in valid else "left", vertical="center", wrap_text=wrap)
-
-def thin_border():
-    s = Side(style="thin", color="FFE5E7EB")
+def _fill(c):  return PatternFill("solid", fgColor=c)
+def _font(bold=False, sz=11, color=FDK):
+    return Font(name="Calibri", size=sz, bold=bold, color=color)
+def _align(h="left", wrap=False):
+    return Alignment(horizontal=h, vertical="center", wrap_text=wrap)
+def _thin():
+    s = Side(style="thin", color="FFD1D5DB")
     return Border(left=s, right=s, top=s, bottom=s)
-
-def dark_border():
+def _dark():
     s = Side(style="thin", color="FF374151")
     return Border(left=s, right=s, top=s, bottom=s)
+def _w(ws, col, width):
+    ws.column_dimensions[get_column_letter(col)].width = width
 
-def sh(ws, r, c1, c2, text, bg=CG8, fc=FW, sz=10, al="center"):
+def _sec(ws, r, c1, c2, text, sz=11):
+    """Dark full-width section bar."""
     if c1 != c2:
         ws.merge_cells(start_row=r, start_column=c1, end_row=r, end_column=c2)
     cell = ws.cell(row=r, column=c1, value=text)
-    cell.fill      = fill(bg)
-    cell.font      = font(bold=True, size=sz, color=fc)
-    cell.alignment = align(al)
-    cell.border    = dark_border()
-    return cell
+    cell.fill = _fill(CG8); cell.font = _font(True, sz, FW)
+    cell.alignment = _align("left"); cell.border = _dark()
 
-def sc(cell, bg=None, bold=False, al="left", nf=None, fc=FDK, sz=11):
-    if bg:
-        cell.fill = fill(bg)
-    cell.font      = font(bold=bold, size=sz, color=fc)
-    cell.alignment = align(al)
-    cell.border    = thin_border()
-    if nf:
-        cell.number_format = nf
+def _grp(ws, r, c1, c2, text, fc=FW):
+    """Group header spanning columns — dark bg, colored text label."""
+    if c1 != c2:
+        ws.merge_cells(start_row=r, start_column=c1, end_row=r, end_column=c2)
+    cell = ws.cell(row=r, column=c1, value=text)
+    cell.fill = _fill(CG8); cell.font = Font(name="Calibri", size=9, bold=True, color=fc)
+    cell.alignment = _align("center"); cell.border = _dark()
 
-def ug(val, unit):
-    return (f'({val}*IF({unit}="lb",453.592,'
-            f'IF({unit}="oz",28.34952,'
-            f'IF({unit}="gal",3785.41,1))))')
+def _ch(ws, r, c, text, fc=FW):
+    """Column header cell — dark bg."""
+    cell = ws.cell(row=r, column=c, value=text)
+    cell.fill = _fill(CG8); cell.font = Font(name="Calibri", size=9, bold=True, color=fc)
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    cell.border = _dark()
 
+def _inp(ws, r, c, val, al="right", nf=None):
+    """Yellow user-input cell."""
+    cell = ws.cell(row=r, column=c, value=val)
+    cell.fill = _fill(CY); cell.font = _font(False, 11, FDK)
+    cell.alignment = _align(al); cell.border = _thin()
+    if nf: cell.number_format = nf
+
+def _dat(ws, r, c, val, fc=FDK, bold=False, al="right", nf=None, sz=11):
+    """White computed/data cell — no background tint."""
+    cell = ws.cell(row=r, column=c, value=val)
+    cell.fill = _fill(CW); cell.font = _font(bold, sz, fc)
+    cell.alignment = _align(al); cell.border = _thin()
+    if nf: cell.number_format = nf
+
+def _tot(ws, r, c, val, fc=FDK, bold=True, al="right", nf=None):
+    """Totals row cell — light grey bg."""
+    cell = ws.cell(row=r, column=c, value=val)
+    cell.fill = _fill(CG1); cell.font = _font(bold, 11, fc)
+    cell.alignment = _align(al); cell.border = _thin()
+    if nf: cell.number_format = nf
+
+
+# ─────────────────────────────────────────────────────────────
+# UNIT CONVERSION FORMULA FRAGMENTS
+# ─────────────────────────────────────────────────────────────
+def _u2g(val, unit_ref):
+    return (f'({val}*IF({unit_ref}="lb",453.592,'
+            f'IF({unit_ref}="kg",1000,'
+            f'IF({unit_ref}="oz",28.34952,'
+            f'IF({unit_ref}="gal",3785.41,1)))))')
+
+def _g2u(grams, unit_ref):
+    return (f'({grams}/IF({unit_ref}="lb",453.592,'
+            f'IF({unit_ref}="kg",1000,'
+            f'IF({unit_ref}="oz",28.34952,'
+            f'IF({unit_ref}="gal",3785.41,1)))))')
+
+
+# ═════════════════════════════════════════════════════════════
+# COLUMN MAP  (18 columns, matching frontend exactly)
+#
+#  A(1)  Ingredient name           — user input (yellow, left)
+#  B(2)  MOQ amount                — user input (yellow)
+#  C(3)  MOQ unit                  — user input (yellow, center)
+#  D(4)  PI amount                 — user input (yellow)
+#  E(5)  PI unit                   — user input (yellow, center)
+#  F(6)  Cost/unit amount          — user input (yellow)
+#  G(7)  Cost unit                 — user input (yellow, center)
+#  H(8)  Formula %                 — user input (yellow)
+#  I(9)  g/Unit                    — computed  (white)
+#  J(10) Cost/g                    — computed  (white)
+#  K(11) Cost/Unit                 — computed  (white)
+#  L(12) MOQ (g)                   — computed  (white)
+#  M(13) PI (g)                    — computed  (white)
+#  N(14) MOQ Cost $                — computed  (white)
+#  O(15) Anchor Score              — computed  (white)
+#  P(16) Units to Hit              — computed  (white)
+#  Q(17) Rank                      — computed  (white, center)
+#  R(18) Elig Y/N                  — user input (yellow, center)
+# ═════════════════════════════════════════════════════════════
 
 def build_excel(analysis_name, sachet_grams, anchor_util_pct, what_if_units, ingredients):
-    wb  = Workbook()
-    ws  = wb.active
+    wb = Workbook()
+    ws = wb.active
     ws.title = "RM Analysis"
+    N = len(ingredients)
 
-    N          = len(ingredients)
-    anchor_dec = anchor_util_pct / 100.0
+    # Column widths — match the proportions visible in screenshot
+    for col, width in {
+        1: 24,   # Ingredient name
+        2: 9,    # MOQ amount
+        3: 5,    # MOQ unit
+        4: 7,    # PI amount
+        5: 5,    # PI unit
+        6: 10,   # Cost/unit amount
+        7: 5,    # Cost unit
+        8: 10,   # Formula %
+        9: 10,   # g/Unit
+        10: 10,  # Cost/g
+        11: 11,  # Cost/Unit
+        12: 13,  # MOQ (g)
+        13: 11,  # PI (g)
+        14: 12,  # MOQ Cost $
+        15: 12,  # Anchor Score
+        16: 13,  # Units to Hit
+        17: 7,   # Rank
+        18: 6,   # Elig
+    }.items():
+        _w(ws, col, width)
 
-    widths = {1:28, 2:11, 3:7, 4:11, 5:7, 6:11, 7:11, 8:10,
-              9:13, 10:11, 11:14, 12:13, 13:13, 14:13, 15:13, 16:10, 17:8}
-    for col, w in widths.items():
-        ws.column_dimensions[get_column_letter(col)].width = w
+    # ── Row index constants ───────────────────────────────────
+    R_TITLE = 1
+    R_LEGEND= 2
+    R_S1    = 4
+    R_SG    = 5
+    R_AU    = 6
+    R_S2    = 8
+    R_KH    = 9
+    R_KV    = 10
+    R_KS    = 11
+    R_GH    = 12   # group headers (VENDOR INPUTS / RECIPE / COST / MOQ REF / ANCHOR)
+    R_CH    = 13   # column headers (MOQ / PI / COST/UNIT / FORMULA% / g/UNIT …)
+    R_IF    = 14   # first ingredient row
+    R_IL    = R_IF + N - 1
+    R_IT    = R_IL + 1   # matrix totals
+    R_S3    = R_IT + 2
+    R_WH    = R_S3 + 1
+    R_WI    = R_WH + 1
+    R_CH2   = R_WI + 2
+    R_CV    = R_CH2 + 1
+    R_CI    = R_CV + 1
+    R_CD    = R_CI + 1
+    R_SH    = R_CD + 2
+    R_SF    = R_SH + 1
+    R_BH    = R_SF + 6
+    R_BGH   = R_BH + 1
+    R_BCH   = R_BGH + 1
+    R_BF    = R_BCH + 1
+    R_BL    = R_BF + N - 1
+    R_BT    = R_BL + 1
 
-    R_TITLE   = 1
-    R_LEGEND  = 2
-    R_S1      = 4
-    R_SG      = 5
-    R_AU      = 6
-    R_S2      = 8
-    R_POL_H   = 9
-    R_POL_V   = 10
-    R_POL_S   = 11
-    R_MAT_GRP = 12
-    R_MAT_COL = 13
-    R_ING_F   = 14
-    R_ING_L   = R_ING_F + N - 1
-    R_ING_T   = R_ING_L + 1
-    R_S3      = R_ING_T + 2
-    R_WI_H    = R_S3 + 1
-    R_WI_IN   = R_WI_H + 1
-    R_CPM_H   = R_WI_IN + 1
-    R_CPM_V   = R_CPM_H + 1
-    R_CPM_I   = R_CPM_V + 1
-    R_CPM_D   = R_CPM_I + 1
-    R_SUM_H   = R_CPM_D + 2
-    R_SUM_F   = R_SUM_H + 1
-    R_SUM_L   = R_SUM_F + 4
-    R_BRK_S   = R_SUM_L + 2
-    R_BRK_GRP = R_BRK_S + 1
-    R_BRK_COL = R_BRK_GRP + 1
-    R_BRK_F   = R_BRK_COL + 1
-    R_BRK_L   = R_BRK_F + N - 1
-    R_BRK_T   = R_BRK_L + 1
+    fr, lr  = R_IF, R_IL
+    bf, bl  = R_BF, R_BL
 
-    SG = f"B{R_SG}"
-    AU = f"B{R_AU}"
-    WI = f"B{R_WI_IN}"
+    SG      = f"$B${R_SG}"
+    AU      = f"$B${R_AU}"
+    WI_REF  = f"$B${R_WI}"
+    REC_MOQ = f"$A${R_KV}"
+    plan_u  = f"IF({WI_REF}>0,{WI_REF},{REC_MOQ})"
 
-    fr, lr  = R_ING_F, R_ING_L
-    N_RNG   = f"$N${fr}:$N${lr}"
-    Q_RNG   = f"$Q${fr}:$Q${lr}"
+    K_RNG   = f"$K${fr}:$K${lr}"
     O_RNG   = f"$O${fr}:$O${lr}"
-    bf, bl  = R_BRK_F, R_BRK_L
+    P_RNG   = f"$P${fr}:$P${lr}"
+    Q_RNG   = f"$Q${fr}:$Q${lr}"
+    EL_RNG  = f"$R${fr}:$R${lr}"
 
-    rec_moq_ref = f"A{R_POL_V}"
-    plan_u      = f"IF({WI}>0,{WI},{rec_moq_ref})"
+    # ── TITLE ─────────────────────────────────────────────────
+    ws.row_dimensions[R_TITLE].height = 22
+    _sec(ws, R_TITLE, 1, 18,
+         f"  MOQ & Purchase Analysis Tool  ·  {analysis_name or 'Analysis'}", sz=13)
 
-    def bc(col): return get_column_letter(col)
+    # ── LEGEND row — yellow spans full width ──────────────────
+    ws.row_dimensions[R_LEGEND].height = 14
+    ws.merge_cells(start_row=R_LEGEND, start_column=1, end_row=R_LEGEND, end_column=18)
+    lc = ws.cell(row=R_LEGEND, column=1, value="  🟡  Yellow = User Input")
+    lc.fill = _fill(CY)
+    lc.font = Font(name="Calibri", size=9, bold=True, color=FYL)
+    lc.alignment = _align("left")
+    lc.border = _dark()
 
-    # Title
-    ws.row_dimensions[R_TITLE].height = 24
-    sh(ws, R_TITLE, 1, 17,
-       f"Raw Materials Costing & Purchasing  ·  {analysis_name or 'Analysis'}",
-       bg=CG8, fc=FW, sz=13, al="left")
+    # ── SECTION 1 ─────────────────────────────────────────────
+    ws.row_dimensions[R_S1].height = 16
+    _sec(ws, R_S1, 1, 18, "  SECTION 1 — Scenario Parameters")
 
-    # Legend
-    ws.row_dimensions[R_LEGEND].height = 16
-    for c1, c2, txt, bg, fc in [
-        (1,3,"🟡  User Input",CY,FYL),(4,6,"🔵  Calculated",CB,FBL),
-        (7,9,"🟢  $ / Cost",CG,FGR),(10,12,"🟠  Grams",CO,FOR),
-        (13,17,"🟣  Anchor / Bottleneck",CP,FPU),
-    ]:
-        sh(ws, R_LEGEND, c1, c2, txt, bg=bg, fc=fc, sz=10, al="left")
-
-    # Section 1
-    ws.row_dimensions[R_S1].height = 18
-    sh(ws, R_S1, 1, 17, "  SECTION 1 — Scenario Parameters", bg=CG8, fc=FW, sz=11, al="left")
-    for row, lbl, val, nf in [
-        (R_SG, "Sachet Grams (g)",       sachet_grams, "0.00"),
-        (R_AU, "Anchor Utilization (%)", anchor_dec,   "0%"),
+    for row, label, value, nf in [
+        (R_SG, "Sachet Grams (g)",        sachet_grams,        NF_DEC2),
+        (R_AU, "Anchor Utilization (%)",  anchor_util_pct/100, NF_PCT),
     ]:
         ws.row_dimensions[row].height = 18
-        lc = ws.cell(row=row, column=1, value=lbl)
-        sc(lc, bg=CG50, bold=True, al="left")
-        vc = ws.cell(row=row, column=2, value=val)
-        sc(vc, bg=CY, al="right", nf=nf)
-        for c in range(3, 18):
-            sc(ws.cell(row=row, column=c), bg=CG50)
+        # label cell
+        lc = ws.cell(row=row, column=1, value=label)
+        lc.fill = _fill(CG50); lc.font = _font(True, 10, FDK)
+        lc.alignment = _align("left"); lc.border = _thin()
+        # value cell (yellow input)
+        _inp(ws, row, 2, value, al="right", nf=nf)
+        # rest of row — plain white
+        for c in range(3, 19):
+            cell = ws.cell(row=row, column=c)
+            cell.fill = _fill(CW); cell.border = _thin()
 
-    # Section 2
-    ws.row_dimensions[R_S2].height = 18
-    sh(ws, R_S2, 1, 17,
-       "  SECTION 2 — Recipe & Vendor Input  ·  Policy Summary & Ingredient Matrix",
-       bg=CG8, fc=FW, sz=11, al="left")
+    # ── SECTION 2 ─────────────────────────────────────────────
+    ws.row_dimensions[R_S2].height = 16
+    _sec(ws, R_S2, 1, 18, "  SECTION 2 — Recipe & Vendor Input  ·  Ingredient Matrix")
 
-    ws.row_dimensions[R_POL_H].height = 15
-    ws.row_dimensions[R_POL_V].height = 26
-    ws.row_dimensions[R_POL_S].height = 13
+    # KPI cards
+    elig_ct = f'COUNTIF({EL_RNG},"Y")'
+    # Rec MOQ: weighted avg of top-3 UTH, weight = UTH × Cost/Unit (composite score)
+    t3_num  = (f'SUMPRODUCT(({EL_RNG}="Y")*({Q_RNG}<=3)*({P_RNG}*{K_RNG}>0)*{P_RNG}*{P_RNG}*{K_RNG})')
+    t3_den  = (f'SUMPRODUCT(({EL_RNG}="Y")*({Q_RNG}<=3)*({P_RNG}*{K_RNG}>0)*{P_RNG}*{K_RNG})')
+    fp_num  = f'SUMPRODUCT(({EL_RNG}="Y")*({P_RNG}*{K_RNG}>0)*{P_RNG}*{P_RNG}*{K_RNG})'
+    fp_den  = f'SUMPRODUCT(({EL_RNG}="Y")*({P_RNG}*{K_RNG}>0)*{P_RNG}*{K_RNG})'
+    rec_f   = (f'=IF({elig_ct}>=3,'
+               f'IFERROR(CEILING({t3_num}/{t3_den},1),0),'
+               f'IFERROR(CEILING({fp_num}/{fp_den},1),0))')
 
-    rec_moq_f = (
-        f'=IFERROR(CEILING('
-        f'SUMPRODUCT(({Q_RNG}="Y")*{O_RNG}*{N_RNG})/'
-        f'SUMPRODUCT(({Q_RNG}="Y")*{N_RNG})'
-        f',1),0)'
-    )
-    for c1, c2, hdr, formula, nf, bg, fc, sub in [
-        (1,4,"Recommended MOQ",rec_moq_f,'#,##0 "units"',CY,FYL,
-         "SUMPRODUCT(uth×score) ÷ SUMPRODUCT(score)  [Eligible=Y only]"),
-        (5,8,"Recipe Cost / Unit",f"=SUM(K{fr}:K{lr})",'"$"#,##0.0000',CG,FGR,
+    ws.row_dimensions[R_KH].height = 13
+    ws.row_dimensions[R_KV].height = 30
+    ws.row_dimensions[R_KS].height = 13
+
+    kpi_cards = [
+        # (c1, c2, label_text, formula, nf, value_fc, sub_text)
+        (1,  4,  "RECOMMENDED MOQ",
+         rec_f, NF_UNITS, FYL,
+         "top 3 anchor weighted  (full-pool fallback if < 3 elig.)"),
+        (5,  9,  "RECIPE COST / UNIT",
+         f"=SUM(K{fr}:K{lr})", NF_D4, FGR,
          "at 100% efficiency  (ideal)"),
-        (9,12,"Recipe Cost / Gram",f"=IFERROR(SUM(K{fr}:K{lr})/{SG},0)",'"$"#,##0.000000',CG,FGR,
+        (10, 13, "RECIPE COST / GRAM",
+         f"=IFERROR(SUM(K{fr}:K{lr})/{SG},0)", NF_D6, FGR,
          "at 100% efficiency  (ideal)"),
-        (13,17,"Minimum MOQ Cost",f"=SUM(M{fr}:M{lr})",'"$"#,##0.00',CB,FBL,
+        (14, 18, "MIN. MOQ COST",
+         f"=SUM(N{fr}:N{lr})", NF_D2, FBL,
          "sum of all 1× MOQ purchase costs"),
-    ]:
-        sh(ws, R_POL_H, c1, c2, hdr, bg=CG7, fc=FW, sz=9, al="center")
-        ws.merge_cells(start_row=R_POL_V, start_column=c1, end_row=R_POL_V, end_column=c2)
-        vc = ws.cell(row=R_POL_V, column=c1, value=formula)
-        vc.fill=fill(bg); vc.font=Font(name="Calibri",size=16,bold=True,color=fc)
-        vc.alignment=align("center"); vc.border=dark_border(); vc.number_format=nf
-        ws.merge_cells(start_row=R_POL_S, start_column=c1, end_row=R_POL_S, end_column=c2)
-        sc2 = ws.cell(row=R_POL_S, column=c1, value=sub)
-        sc2.fill=fill(CG50); sc2.font=Font(name="Calibri",size=9,color="FF6B7280")
-        sc2.alignment=align("center"); sc2.border=thin_border()
+    ]
+    for c1, c2, lbl, formula, nf, fc, sub in kpi_cards:
+        # header label
+        ws.merge_cells(start_row=R_KH, start_column=c1, end_row=R_KH, end_column=c2)
+        kh = ws.cell(row=R_KH, column=c1, value=lbl)
+        kh.fill = _fill(CG7); kh.font = Font(name="Calibri", size=9, bold=True, color=FG4)
+        kh.alignment = _align("left"); kh.border = _dark()
+        # big value
+        ws.merge_cells(start_row=R_KV, start_column=c1, end_row=R_KV, end_column=c2)
+        kv = ws.cell(row=R_KV, column=c1, value=formula)
+        kv.fill = _fill(CW); kv.font = Font(name="Calibri", size=16, bold=True, color=fc)
+        kv.alignment = _align("left"); kv.border = _thin(); kv.number_format = nf
+        # subtitle
+        ws.merge_cells(start_row=R_KS, start_column=c1, end_row=R_KS, end_column=c2)
+        ks = ws.cell(row=R_KS, column=c1, value=sub)
+        ks.fill = _fill(CW); ks.font = Font(name="Calibri", size=9, color=FG5)
+        ks.alignment = _align("left"); ks.border = _thin()
 
-    # Matrix group headers
-    ws.row_dimensions[R_MAT_GRP].height = 13
-    for c1, c2, lbl, bg, fc, al in [
-        (1,1,"Ingredient",CG8,FW,"left"),(2,7,"Vendor Inputs",CG8,FW,"center"),
-        (8,8,"Recipe",CG7,"FF86EFAC","center"),(9,11,"Recipe Costs",CG7,"FF86EFAC","center"),
-        (12,13,"MOQ Reference",CG7,"FFFDBA74","center"),(14,17,"Anchor Analysis",CG8,"FFC4B5FD","center"),
-    ]:
-        sh(ws, R_MAT_GRP, c1, c2, lbl, bg=bg, fc=fc, sz=9, al=al)
+    # ── GROUP HEADERS (row R_GH) ──────────────────────────────
+    # Matches frontend exactly:
+    # Ingredient | VENDOR INPUTS(cols 2-8) | RECIPE(9) | COST(10-11) |
+    # MOQ REFERENCE(12-14) | ANCHOR ANALYSIS(15-17) | ELIG.(18)
+    ws.row_dimensions[R_GH].height = 14
+    # Ingredient — spans rows R_GH and R_CH (rowspan=2 equivalent via merge)
+    ws.merge_cells(start_row=R_GH, start_column=1, end_row=R_CH, end_column=1)
+    ic = ws.cell(row=R_GH, column=1, value="INGREDIENT")
+    ic.fill = _fill(CG8); ic.font = Font(name="Calibri", size=9, bold=True, color=FW)
+    ic.alignment = Alignment(horizontal="left", vertical="center")
+    ic.border = _dark()
 
-    # Matrix column headers
-    ws.row_dimensions[R_MAT_COL].height = 34
-    for col, lbl, bg, al in [
-        (1,"Ingredient\nName",CG8,"left"),(2,"Vendor\nMOQ",CG8,"center"),
-        (3,"Unit",CG8,"center"),(4,"Purch.\nIncrement",CG8,"center"),
-        (5,"PI\nUnit",CG8,"center"),(6,"PI (g)",CG8,"center"),
-        (7,"Cost / unit",CG8,"center"),(8,"Formula %",CG7,"center"),
-        (9,"Cost / g",CG7,"center"),(10,"g / Unit",CG7,"center"),
-        (11,"Cost / Unit\n(Ideal)",CG7,"center"),(12,"MOQ (g)",CG7,"center"),
-        (13,"MOQ Cost $",CG7,"center"),(14,"Anchor\nScore $",CG8,"center"),
-        (15,"Units to\nHit Target",CG8,"center"),(16,"Anchor\nRank",CG8,"center"),
-        (17,"Elig.\nY/N",CG8,"center"),
-    ]:
-        c = ws.cell(row=R_MAT_COL, column=col, value=lbl)
-        sc(c, bg=bg, bold=True, al=al, fc=FW, sz=9)
-        c.alignment = Alignment(horizontal=al, vertical="center", wrap_text=True)
 
-    # Ingredient rows
-    UNIT_TO_G = {"lb":453.592,"g":1,"oz":28.34952,"gal":3785.41}
+
+    # ── COLUMN HEADERS (row R_CH) — sub-columns under each group ─
+    # Under VENDOR INPUTS (2-8): MOQ | MOQ Unit | PI | PI Unit | Cost/unit | Cost Unit
+    # Under RECIPE (9): Formula % | g/Unit   ← NOTE: frontend shows RECIPE spanning 2 cols
+    # Re-check: screenshot shows RECIPE only over "Formula %" and then g/Unit is separate?
+    # Looking at screenshot: Recipe group → Formula% + g/Unit (2 cols, 8-9)
+    # Cost group → Cost/g + Cost/Unit (2 cols, 10-11)
+    # So group headers should be:
+    #   Ingredient(1) | Vendor Inputs(2-8=7cols) | Recipe(9=1col... wait
+    # Screenshot: VENDOR INPUTS covers MOQ(num+unit=2) PI(num+unit=2) Cost/unit(num+unit=2) = 6 cols
+    # But Formula% is also yellow (user input) under Vendor Inputs? No — it's separate "Recipe"
+    # Let me recount from screenshot column by column:
+    # Col1=Ingredient, Col2=MOQ, Col3=MOQUnit, Col4=PI, Col5=PIUnit, Col6=Cost/unit, Col7=CostUnit
+    # Col8=Formula%, Col9=g/Unit, Col10=Cost/g, Col11=Cost/Unit
+    # Col12=MOQ(g), Col13=PI(g), Col14=MOQ Cost$
+    # Col15=Anchor Score, Col16=Units to Hit, Col17=Rank, Col18=Elig
+    # Group spans: VendorInputs=2-7(6cols), Recipe=8-9(2cols), Cost=10-11(2cols),
+    #              MOQRef=12-14(3cols), Anchor=15-17(3cols)
+    # But above I already set VendorInputs=2-8 (7 cols). Fix: VendorInputs=2-7, Recipe=8-9
+    # Need to redo group row. Already merged above — recreate properly.
+
+    ws.row_dimensions[R_CH].height = 32
+
+    col_hdrs = [
+        # (col, text, group_fc for tinting, width_hint)
+        (2,  "MOQ",         "FFFCD34D"),
+        (3,  "MOQ\nUnit",   "FFFCD34D"),
+        (4,  "PI",          "FFFCD34D"),
+        (5,  "PI\nUnit",    "FFFCD34D"),
+        (6,  "Cost /\nUnit","FFFCD34D"),
+        (7,  "Cost\nUnit",  "FFFCD34D"),
+        (8,  "Formula %",   "FF86EFAC"),
+        (9,  "g / Unit",    "FF86EFAC"),
+        (10, "Cost / g",    "FF5EEAD4"),
+        (11, "Cost / Unit", "FF5EEAD4"),
+        (12, "MOQ (g)",     "FFFDBA74"),
+        (13, "PI (g)",      "FFFDBA74"),
+        (14, "MOQ Cost $",  "FFFDBA74"),
+        (15, "Anchor\nScore","FFC4B5FD"),
+        (16, "Units\nto Hit","FFC4B5FD"),
+        (17, "Rank",        "FFC4B5FD"),
+        (18, "Elig.\nY/N",  "FFFCA5A5"),
+    ]
+    for col, text, fc in col_hdrs:
+        cell = ws.cell(row=R_CH, column=col, value=text)
+        cell.fill = _fill(CG8)
+        cell.font = Font(name="Calibri", size=9, bold=True, color=fc)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _dark()
+
+    # Fix group header merges to correct spans now that we know layout:
+    # Unmerge the wrong ones and re-merge correctly
+    # We need to redo R_GH row properly — unmerge all and redo
+    # openpyxl doesn't have unmerge-all-in-row easily, so we'll just overwrite
+    # the cells (merged cells keep first cell value; we need to fix 2-8 → 2-7, add 8-9)
+    # Since we already called _grp with wrong spans above, we need to NOT do that —
+    # let me restructure: do group headers AFTER column headers so we can overwrite.
+    # Actually openpyxl merge_cells overwrites prior merges for overlapping ranges.
+    # Re-do group header row with correct spans:
+    ws.merge_cells(start_row=R_GH, start_column=2,  end_row=R_GH, end_column=7)
+    ws.merge_cells(start_row=R_GH, start_column=8,  end_row=R_GH, end_column=9)
+    ws.merge_cells(start_row=R_GH, start_column=10, end_row=R_GH, end_column=11)
+    ws.merge_cells(start_row=R_GH, start_column=12, end_row=R_GH, end_column=14)
+    ws.merge_cells(start_row=R_GH, start_column=15, end_row=R_GH, end_column=17)
+    # col 18 no merge needed
+
+    def _grp2(c1, text, fc):
+        cell = ws.cell(row=R_GH, column=c1, value=text)
+        cell.fill = _fill(CG8)
+        cell.font = Font(name="Calibri", size=9, bold=True, color=fc)
+        cell.alignment = _align("center")
+        cell.border = _dark()
+
+    _grp2(2,  "VENDOR INPUTS",   "FFFCD34D")
+    _grp2(8,  "RECIPE",          "FF86EFAC")
+    _grp2(10, "COST",            "FF5EEAD4")
+    _grp2(12, "MOQ REFERENCE",   "FFFDBA74")
+    _grp2(15, "ANCHOR ANALYSIS", "FFC4B5FD")
+    cell18 = ws.cell(row=R_GH, column=18, value="ELIG.")
+    cell18.fill = _fill(CG8)
+    cell18.font = Font(name="Calibri", size=9, bold=True, color="FFFCA5A5")
+    cell18.alignment = _align("center"); cell18.border = _dark()
+
+    # ── INGREDIENT ROWS ───────────────────────────────────────
     for i, ing in enumerate(ingredients):
-        row = R_ING_F + i
+        row = R_IF + i
         ws.row_dimensions[row].height = 16
 
-        moq       = float(ing.get("moq") or 0)
-        unit      = ing.get("unit") or "lb"
-        pi_val    = float(ing.get("pi") or 0)
-        pi_unit   = ing.get("piUnit") or ""
-        cost_val  = float(ing.get("costPerLb") or 0)
-        cost_unit = ing.get("costUnit") or "lb"
-        pct       = float(ing.get("pct") or 0)
-        anchor    = ing.get("anchorOvr") or ("Y" if cost_val > 0 else "N")
-        lcg_val   = cost_val / UNIT_TO_G.get(cost_unit, 453.592)
+        moq_amt   = float(ing.get("moq")        or 0)
+        moq_unit  = str(ing.get("unit")         or "lb").strip() or "lb"
+        pi_amt    = float(ing.get("pi")         or 0)
+        pi_unit_r = str(ing.get("piUnit")       or "").strip()
+        pi_unit   = pi_unit_r if pi_unit_r else moq_unit
+        cost_amt  = float(ing.get("costPerLb")  or 0)
+        cost_unit = str(ing.get("costUnit")     or "lb").strip() or "lb"
+        pct_dec   = float(ing.get("pct")        or 0)
+        anch_ovr  = ing.get("anchorOvr")
+        elig      = anch_ovr if anch_ovr in ("Y","N") else ("Y" if cost_amt > 0 else "N")
 
-        rB=f"B{row}";rC=f"C{row}";rD=f"D{row}";rE=f"E{row}"
-        rF=f"F{row}";rG=f"G{row}";rH=f"H{row}";rI=f"I{row}"
-        rJ=f"J{row}";rK=f"K{row}";rL=f"L{row}";rM=f"M{row}"
-        rN=f"N{row}";rO=f"O{row}";rP=f"P{row}";rQ=f"Q{row}"
+        def r_(l): return f"{l}{row}"
+        B=r_("B"); C=r_("C"); D=r_("D"); E=r_("E")
+        F=r_("F"); G=r_("G"); H=r_("H"); I=r_("I"); J=r_("J")
+        K=r_("K"); L=r_("L"); M=r_("M"); N_=r_("N"); O_=r_("O")
+        P_=r_("P"); Q_=r_("Q"); R_=r_("R")
 
-        moq_g = (f'IF({rC}="lb",{rB}*453.592,'
-                 f'IF({rC}="oz",{rB}*28.34952,'
-                 f'IF({rC}="gal",{rB}*3785.41,{rB})))')
+        # Yellow user-input cells
+        _inp(ws, row, 1, ing.get("name",""), al="left")
+        _inp(ws, row, 2, moq_amt,  al="right", nf=NF_DEC2)
+        _inp(ws, row, 3, moq_unit, al="center")
+        _inp(ws, row, 4, pi_amt,   al="right", nf=NF_DEC2)
+        _inp(ws, row, 5, pi_unit,  al="center")
+        _inp(ws, row, 6, cost_amt, al="right", nf='"$"#,##0.0000')
+        _inp(ws, row, 7, cost_unit, al="center")
+        _inp(ws, row, 8, pct_dec,  al="right", nf=NF_PCT)
+        _inp(ws, row, 18, elig,    al="center")
 
-        pi_g_f = (
-            f'=IF(OR({rD}="",{rD}=0),"—",'
-            f'IF(OR({rE}="",{rE}={rC}),'
-            f'{ug(rD,rC)},{ug(rD,rE)}))'
-        )
+        # White computed cells
+        # g/Unit = sachet_g × formula%
+        _dat(ws, row, 9,  f"={SG}*{H}", nf=NF_DEC3)
+        # Cost/g = cost_per_cost_unit / grams_per_cost_unit
+        _dat(ws, row, 10, f"=IFERROR({F}/{_u2g('1',G)},0)", nf=NF_D6)
+        # Cost/Unit = g/unit × cost/g
+        _dat(ws, row, 11, f"={I}*{J}", nf=NF_D4)
+        # MOQ (g)
+        _dat(ws, row, 12, f"={_u2g(B,C)}", nf=NF_DEC2)
+        # PI (g) — mirrors frontend piGrams()
+        pi_g = (f'=IFERROR(IF(OR({D}="",{D}=0),"—",{_u2g(D,E)}),"—")')
+        _dat(ws, row, 13, pi_g, nf=NF_DEC2)
+        # MOQ Cost $
+        _dat(ws, row, 14, f"={L}*{J}", nf=NF_D2)
+        # Anchor Score
+        _dat(ws, row, 15, f'=IF({R_}="Y",{N_}*{AU},0)', nf=NF_D2)
+        # Units to Hit
+        _dat(ws, row, 16, f'=IFERROR(IF({R_}="Y",({L}*{AU})/{I},0),0)', nf=NF_DEC3)
+        # Rank
+        # Composite rank score = UTH × Cost/Unit (P × K)
+        rank_f = (f'=IFERROR(IF(AND({R_}="Y",{P_}>0,{K}>0),'
+                  f'1+SUMPRODUCT(({EL_RNG}="Y")*({P_RNG}*{K_RNG}>{P_}*{K})),'
+                  f'"—"),"—")')
+        _dat(ws, row, 17, rank_f, al="center")
 
-        for col, val, al, nf in [
-            (1,ing.get("name",""),"left",None),(2,moq,"right","#,##0.##"),
-            (3,unit,"center",None),(4,pi_val,"right","#,##0.##"),
-            (5,pi_unit,"center",None),(7,cost_val,"right",'"$"#,##0.0000'),
-            (8,pct,"right","0.00%"),(17,anchor,"center",None),
-        ]:
-            c = ws.cell(row=row, column=col, value=val)
-            sc(c, bg=CY, al=al, nf=nf)
+    # ── MATRIX TOTALS ROW ─────────────────────────────────────
+    ws.row_dimensions[R_IT].height = 17
+    # Merge label across input cols
+    ws.merge_cells(start_row=R_IT, start_column=1, end_row=R_IT, end_column=7)
+    tc = ws.cell(row=R_IT, column=1, value="TOTALS")
+    tc.fill = _fill(CG1); tc.font = _font(True, 11, FDK)
+    tc.alignment = _align("left"); tc.border = _thin()
 
-        for col, formula, bg, al, nf, fc in [
-            (6,  pi_g_f,                                                         CB,"right","#,##0.00",FBL),
-            (9,  lcg_val,                                                         CW,"right",'"$"#,##0.000000',FGR),
-            (10, f"={SG}*{rH}",                                                   CW,"right","#,##0.0000",FDK),
-            (11, f"={rJ}*{rI}",                                                   CG,"right",'"$"#,##0.000000',FGR),
-            (12, f"={moq_g}",                                                     CW,"right","#,##0.00",FDK),
-            (13, f"={rL}*{rI}",                                                   CO,"right",'"$"#,##0.00',FOR),
-            (14, f'=IF({rQ}="Y",{rM}*{AU},0)',                                    CO,"right",'"$"#,##0.00',FOR),
-            (15, f'=IFERROR(IF({rQ}="Y",({moq_g}*{AU})/{rJ},0),0)',              CP,"right","#,##0",FPU),
-            (16, f'=IFERROR(IF(AND({rQ}="Y",{rN}>0),'
-                 f'1+COUNTIFS({N_RNG},">"&{rN},{Q_RNG},"Y"),"—"),"—")',          CW,"center",None,FDK),
-        ]:
-            c = ws.cell(row=row, column=col, value=formula)
-            sc(c, bg=bg, al=al, nf=nf, fc=fc)
+    _tot(ws, R_IT, 8,  f"=SUM(H{fr}:H{lr})", fc=FGR,  nf=NF_PCT)   # pct sum — green if 100
+    _tot(ws, R_IT, 9,  f"={SG}",              fc=FDK,  nf=NF_G2)    # sachet grams
+    _tot(ws, R_IT, 10, "",      nf=None)
+    _tot(ws, R_IT, 11, f"=SUM(K{fr}:K{lr})", fc=FDK,  nf=NF_D4)    # cost/unit sum
+    _tot(ws, R_IT, 12, "",      nf=None)
+    _tot(ws, R_IT, 13, "",      nf=None)
+    _tot(ws, R_IT, 14, f"=SUM(N{fr}:N{lr})", fc=FDK,  nf=NF_D2)    # MOQ cost sum
+    for c in range(15, 19):
+        _tot(ws, R_IT, c, "")
 
-    # Ingredient totals
-    tr = R_ING_T
-    ws.row_dimensions[tr].height = 18
-    ws.merge_cells(start_row=tr, start_column=1, end_row=tr, end_column=7)
-    sc(ws.cell(row=tr, column=1, value="TOTALS"), bg=CG1, bold=True, al="left")
-    for col, val, nf, bg, fc in [
-        (8,f"=SUM(H{fr}:H{lr})","0.00%",CY,FDK),(9,"",None,CG1,FDK),
-        (10,f"={SG}",'0.00" g"',CG1,FDK),(11,f"=SUM(K{fr}:K{lr})",'"$"#,##0.000000',CG,FGR),
-        (12,"",None,CG1,FDK),(13,f"=SUM(M{fr}:M{lr})",'"$"#,##0.00',CO,FOR),
-        (14,f"=SUM(N{fr}:N{lr})",'"$"#,##0.00',CO,FOR),
-        (15,"",None,CG1,FDK),(16,"",None,CG1,FDK),(17,"",None,CG1,FDK),
-    ]:
-        c = ws.cell(row=tr, column=col, value=val)
-        sc(c, bg=bg, bold=True, al="right", nf=nf, fc=fc)
+    # ── SECTION 3 ─────────────────────────────────────────────
+    ws.row_dimensions[R_S3].height = 16
+    _sec(ws, R_S3, 1, 18, "  SECTION 3 — What-If Scenario Analysis")
 
-    # Section 3
-    ws.row_dimensions[R_S3].height = 18
-    sh(ws, R_S3, 1, 17, "  SECTION 3 — What-If Scenario Analysis", bg=CG8, fc=FW, sz=11, al="left")
-    ws.row_dimensions[R_WI_H].height = 15
-    sh(ws, R_WI_H, 1, 17, "  What-If Inputs & Summary", bg=CG7, fc=FW, sz=10, al="left")
-    ws.row_dimensions[R_WI_IN].height = 20
-    lc = ws.cell(row=R_WI_IN, column=1, value="What-If Units")
-    sc(lc, bg=CG50, bold=True, al="left")
-    vc = ws.cell(row=R_WI_IN, column=2, value=what_if_units or 0)
-    sc(vc, bg=CY, bold=True, al="right", nf="#,##0")
-    for c in range(3, 18):
-        sc(ws.cell(row=R_WI_IN, column=c), bg=CG50)
+    ws.row_dimensions[R_WH].height = 13
+    _sec(ws, R_WH, 1, 18, "  What-If Input", sz=10)
 
-    purg_sum  = f"SUM({bc(5)}{bf}:{bc(5)}{bl})"
-    reqg_sum  = f"SUM({bc(2)}{bf}:{bc(2)}{bl})"
-    purd_sum  = f"SUM({bc(8)}{bf}:{bc(8)}{bl})"
-    usedd_sum = f"SUM({bc(9)}{bf}:{bc(9)}{bl})"
+    ws.row_dimensions[R_WI].height = 20
+    lc2 = ws.cell(row=R_WI, column=1, value="What-If Units")
+    lc2.fill = _fill(CG50); lc2.font = _font(True, 10, FDK)
+    lc2.alignment = _align("left"); lc2.border = _thin()
+    _inp(ws, R_WI, 2, int(what_if_units) if what_if_units else 0, al="right", nf=NF_INT)
+    ws.merge_cells(start_row=R_WI, start_column=3, end_row=R_WI, end_column=12)
+    hint = ws.cell(row=R_WI, column=3,
+                   value=f'=IF({WI_REF}>0,"","← 0 = use Rec. MOQ")')
+    hint.fill = _fill(CW); hint.font = Font(name="Calibri", size=9, color=FG5)
+    hint.alignment = _align("left"); hint.border = _thin()
+    for c in range(13, 19):
+        ws.cell(row=R_WI, column=c).fill = _fill(CW)
+        ws.cell(row=R_WI, column=c).border = _thin()
 
-    for r in [R_CPM_H, R_CPM_V, R_CPM_I, R_CPM_D]:
+    # Cost comparison — breakdown cols forward refs
+    F_sum = f"SUM(F{bf}:F{bl})"
+    G_sum = f"SUM(G{bf}:G{bl})"
+    H_sum = f"SUM(H{bf}:H{bl})"
+    K_sum = f"SUM(K{bf}:K{bl})"
+
+    # Delta format: positive = red (Δ +$X), negative = green (Δ -$X)
+    cpg_wi    = f"=IFERROR({G_sum}/({plan_u}*{SG}),0)"
+    cpg_ideal = f"=IFERROR(SUM(K{fr}:K{lr})/{SG},0)"
+    cpu_wi    = f"=IFERROR({G_sum}/{plan_u},0)"
+    cpu_ideal = f"=SUM(K{fr}:K{lr})"
+    cpg_delta = f"={cpg_wi[1:]}-({cpg_ideal[1:]})"
+    cpu_delta = f"={cpu_wi[1:]}-({cpu_ideal[1:]})"
+
+    for r in [R_CH2, R_CV, R_CI, R_CD]:
         ws.row_dimensions[r].height = 18
 
-    sh(ws, R_CPM_H, 1, 8, "Cost / Gram", bg=CG7, fc=FW, sz=10, al="center")
-    sh(ws, R_CPM_H, 9, 17, "Cost / Unit", bg=CG7, fc=FW, sz=10, al="center")
+    # Cost comparison header
+    ws.merge_cells(start_row=R_CH2, start_column=1, end_row=R_CH2, end_column=9)
+    ws.merge_cells(start_row=R_CH2, start_column=10, end_row=R_CH2, end_column=18)
+    for c1, label in [(1, "COST / GRAM"), (10, "COST / UNIT")]:
+        ch = ws.cell(row=R_CH2, column=c1, value=label)
+        ch.fill = _fill(CG7); ch.font = Font(name="Calibri", size=10, bold=True, color=FW)
+        ch.alignment = _align("center"); ch.border = _dark()
 
-    cpg_wi    = f"=IFERROR({purd_sum}/({plan_u}*{SG}),0)"
-    cpg_ideal = f"=IFERROR(SUM(K{fr}:K{lr})/{SG},0)"
-    cpg_delta = f"=IFERROR({purd_sum}/({plan_u}*{SG})-SUM(K{fr}:K{lr})/{SG},0)"
-    cpu_wi    = f"=IFERROR({purd_sum}/({plan_u}),0)"
-    cpu_ideal = f"=SUM(K{fr}:K{lr})"
-    cpu_delta = f"=IFERROR({purd_sum}/({plan_u})-SUM(K{fr}:K{lr}),0)"
+    # Sub-labels: What-If / Ideal
+    for c1, c2 in [(1,4),(5,9),(10,13),(14,18)]:
+        ws.merge_cells(start_row=R_CV, start_column=c1, end_row=R_CV, end_column=c2)
+        ws.merge_cells(start_row=R_CI, start_column=c1, end_row=R_CI, end_column=c2)
+    for c1, label in [(1,"What-If"),(5,"Ideal"),(10,"What-If"),(14,"Ideal")]:
+        cv = ws.cell(row=R_CV, column=c1, value=label)
+        cv.fill = _fill(CW); cv.font = Font(name="Calibri", size=10, bold=True, color=FG5)
+        cv.alignment = _align("center"); cv.border = _thin()
 
-    for c1, c2 in [(1,4),(5,8),(9,13),(14,17)]:
-        ws.merge_cells(start_row=R_CPM_V, start_column=c1, end_row=R_CPM_V, end_column=c2)
-    for c1, lbl in [(1,"What-If"),(5,"Ideal"),(9,"What-If"),(14,"Ideal")]:
-        c = ws.cell(row=R_CPM_V, column=c1, value=lbl)
-        sc(c, bg=CG50, bold=True, al="center", fc=FG6, sz=10)
+    # Big metric values
+    cmp = [
+        (1,  cpg_wi,    FDK, NF_D6),
+        (5,  cpg_ideal, FGR, NF_D6),
+        (10, cpu_wi,    FDK, NF_D4),
+        (14, cpu_ideal, FGR, NF_D4),
+    ]
+    for c1, formula, fc, nf in cmp:
+        cv2 = ws.cell(row=R_CI, column=c1, value=formula)
+        cv2.fill = _fill(CW); cv2.font = Font(name="Calibri", size=14, bold=True, color=fc)
+        cv2.alignment = _align("center"); cv2.border = _thin(); cv2.number_format = nf
 
-    for c1, c2 in [(1,4),(5,8),(9,13),(14,17)]:
-        ws.merge_cells(start_row=R_CPM_I, start_column=c1, end_row=R_CPM_I, end_column=c2)
-    for c1, formula, bg, fc, nf in [
-        (1,cpg_wi,CB,FBL,'"$"#,##0.000000'),(5,cpg_ideal,CG,FGR,'"$"#,##0.000000'),
-        (9,cpu_wi,CB,FBL,'"$"#,##0.0000'),(14,cpu_ideal,CG,FGR,'"$"#,##0.0000'),
-    ]:
-        c = ws.cell(row=R_CPM_I, column=c1, value=formula)
-        c.fill=fill(bg); c.font=Font(name="Calibri",size=14,bold=True,color=fc)
-        c.alignment=align("center"); c.border=thin_border(); c.number_format=nf
+    # Delta row — red when positive, green when negative
+    ws.merge_cells(start_row=R_CD, start_column=1, end_row=R_CD, end_column=9)
+    ws.merge_cells(start_row=R_CD, start_column=10, end_row=R_CD, end_column=18)
+    for c1, formula, nf in [(1, cpg_delta, NF_DELTA_G), (10, cpu_delta, NF_DELTA_U)]:
+        cd = ws.cell(row=R_CD, column=c1, value=formula)
+        cd.fill = _fill(CW); cd.font = Font(name="Calibri", size=11, bold=True, color=FDK)
+        cd.alignment = _align("center"); cd.border = _thin(); cd.number_format = nf
 
-    ws.merge_cells(start_row=R_CPM_D, start_column=1, end_row=R_CPM_D, end_column=8)
-    ws.merge_cells(start_row=R_CPM_D, start_column=9, end_row=R_CPM_D, end_column=17)
-    for c1, formula, nf in [
-        (1,cpg_delta,'"Δ $"#,##0.000000;[Red]"Δ $"#,##0.000000'),
-        (9,cpu_delta,'"Δ $"#,##0.0000;[Red]"Δ $"#,##0.0000'),
-    ]:
-        c = ws.cell(row=R_CPM_D, column=c1, value=formula)
-        sc(c, bg=CG50, bold=True, al="center", fc=FGR, nf=nf)
+    # ── SUMMARY BLOCK ─────────────────────────────────────────
+    ws.row_dimensions[R_SH].height = 13
+    ws.merge_cells(start_row=R_SH, start_column=1, end_row=R_SH, end_column=9)
+    ws.merge_cells(start_row=R_SH, start_column=10, end_row=R_SH, end_column=18)
+    for c1, label in [(1,"  GRAMS ANALYSIS"),(10,"  $ ANALYSIS")]:
+        sh = ws.cell(row=R_SH, column=c1, value=label)
+        sh.fill = _fill(CG8); sh.font = Font(name="Calibri", size=10, bold=True, color=FW)
+        sh.alignment = _align("left"); sh.border = _dark()
 
-    ws.row_dimensions[R_SUM_H].height = 15
-    sh(ws, R_SUM_H, 1, 8, "  Grams Analysis", bg=CG8, fc=FW, sz=10, al="left")
-    sh(ws, R_SUM_H, 9, 17, "  $ Analysis",    bg=CG8, fc=FW, sz=10, al="left")
+    lef_g = f"({F_sum})-({H_sum})"
+    lef_d = f"({G_sum})-({K_sum})"
 
-    lef_g_sum = f"IFERROR({purg_sum}-{reqg_sum},0)"
-    lef_d_sum = f"IFERROR({purd_sum}-{usedd_sum},0)"
-    for idx, (lg,fg,nfg,fcg,ld,fd,nfd,fcd) in enumerate([
-        ("Total Purchased",f"={purg_sum}",'#,##0.0" g"',FBL,"Total Purchased",f"={purd_sum}",'"$"#,##0.00',FBL),
-        ("Total Used",f"={reqg_sum}",'#,##0.0" g"',FGR,"Total Used",f"={usedd_sum}",'"$"#,##0.00',FGR),
-        ("Total Leftover",f"={lef_g_sum}",'#,##0.0" g"',FOR,"Total Leftover",f"={lef_d_sum}",'"$"#,##0.00',FRD),
-        ("Grams Util %",f"=IFERROR({reqg_sum}/{purg_sum},0)","0.0%",FGR,"$ Util %",f"=IFERROR({usedd_sum}/{purd_sum},0)","0.0%",FGR),
-        ("Grams At Risk %",f"=IFERROR(({purg_sum}-{reqg_sum})/{purg_sum},0)","0.0%",FRD,"$ At Risk %",f"=IFERROR(({purd_sum}-{usedd_sum})/{purd_sum},0)","0.0%",FRD),
-    ]):
-        r = R_SUM_F + idx
+    summary_rows = [
+        ("Total Purchased", f"={F_sum}",                          NF_G1, FBL,
+         "Total Purchased",  f"={G_sum}",                         NF_D2, FBL),
+        ("Total Used",       f"={H_sum}",                         NF_G1, FGR,
+         "Total Used",        f"={K_sum}",                        NF_D2, FGR),
+        ("Total Leftover",   f"={lef_g}",                         NF_G1, FOR_,
+         "Total Leftover",    f"={lef_d}",                        NF_D2, FRD),
+        ("Gram Util %",      f"=IFERROR({H_sum}/{F_sum},0)",      NF_PCT1, FGR,
+         "$ Util %",          f"=IFERROR({K_sum}/{G_sum},0)",     NF_PCT1, FGR),
+        ("Gram At Risk %",   f"=IFERROR(({lef_g})/{F_sum},0)",    NF_PCT1, FRD,
+         "$ At Risk %",       f"=IFERROR(({lef_d})/{G_sum},0)",   NF_PCT1, FRD),
+    ]
+    for idx, (gl, gf, gnf, gfc, dl, df, dnf, dfc) in enumerate(summary_rows):
+        r = R_SF + idx
         ws.row_dimensions[r].height = 18
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
-        lc = ws.cell(row=r, column=1, value=lg); sc(lc, bg=CG50, bold=True, al="left")
-        ws.merge_cells(start_row=r, start_column=5, end_row=r, end_column=8)
-        vc = ws.cell(row=r, column=5, value=fg)
-        vc.fill=fill(CG50); vc.font=Font(name="Calibri",size=13,bold=True,color=fcg)
-        vc.alignment=align("right"); vc.border=thin_border(); vc.number_format=nfg
-        ws.merge_cells(start_row=r, start_column=9, end_row=r, end_column=13)
-        ld2 = ws.cell(row=r, column=9, value=ld); sc(ld2, bg=CG50, bold=True, al="left")
-        ws.merge_cells(start_row=r, start_column=14, end_row=r, end_column=17)
-        vd = ws.cell(row=r, column=14, value=fd)
-        vd.fill=fill(CG50); vd.font=Font(name="Calibri",size=13,bold=True,color=fcd)
-        vd.alignment=align("right"); vd.border=thin_border(); vd.number_format=nfd
+        sl = ws.cell(row=r, column=1, value=gl)
+        sl.fill = _fill(CW); sl.font = _font(True, 10, FDK)
+        sl.alignment = _align("left"); sl.border = _thin()
+        ws.merge_cells(start_row=r, start_column=5, end_row=r, end_column=9)
+        sv = ws.cell(row=r, column=5, value=gf)
+        sv.fill = _fill(CW); sv.font = Font(name="Calibri", size=13, bold=True, color=gfc)
+        sv.alignment = _align("right"); sv.border = _thin(); sv.number_format = gnf
+        ws.merge_cells(start_row=r, start_column=10, end_row=r, end_column=13)
+        dl2 = ws.cell(row=r, column=10, value=dl)
+        dl2.fill = _fill(CW); dl2.font = _font(True, 10, FDK)
+        dl2.alignment = _align("left"); dl2.border = _thin()
+        ws.merge_cells(start_row=r, start_column=14, end_row=r, end_column=18)
+        dv = ws.cell(row=r, column=14, value=df)
+        dv.fill = _fill(CW); dv.font = Font(name="Calibri", size=13, bold=True, color=dfc)
+        dv.alignment = _align("right"); dv.border = _thin(); dv.number_format = dnf
 
-    # Breakdown
-    ws.row_dimensions[R_BRK_S].height = 18
-    sh(ws, R_BRK_S, 1, 9, '  What-If Ingredient Breakdown', bg=CG8, fc=FW, sz=11, al="left")
-    ws.merge_cells(start_row=R_BRK_S, start_column=10, end_row=R_BRK_S, end_column=12)
-    note = ws.cell(row=R_BRK_S, column=10, value=f'="@ "&TEXT({plan_u},"#,##0")&" units"')
-    sc(note, bg=CG8, al="right", fc="FF9CA3AF", sz=9)
+    # ── BREAKDOWN TABLE ───────────────────────────────────────
+    ws.row_dimensions[R_BH].height = 17
+    ws.merge_cells(start_row=R_BH, start_column=1, end_row=R_BH, end_column=10)
+    bh = ws.cell(row=R_BH, column=1, value="  PURCHASE BREAKDOWN")
+    bh.fill = _fill(CG8); bh.font = _font(True, 11, FW)
+    bh.alignment = _align("left"); bh.border = _dark()
+    ws.merge_cells(start_row=R_BH, start_column=11, end_row=R_BH, end_column=18)
+    bn = ws.cell(row=R_BH, column=11,
+                 value=f'="@ "&TEXT({plan_u},"#,##0")&" units"')
+    bn.fill = _fill(CG8); bn.font = Font(name="Calibri", size=9, color=FG4)
+    bn.alignment = _align("right"); bn.border = _dark()
 
-    ws.row_dimensions[R_BRK_GRP].height = 12
-    for c1, c2, lbl, bg, fc, al in [
-        (1,1,"Ingredient",CG8,FW,"left"),(2,5,"Grams Analysis",CG7,"FFFDBA74","center"),
-        (6,7,"Grams Util",CG7,FW,"center"),(8,10,"$ Analysis",CG7,"FF86EFAC","center"),
-        (11,12,"$ Util",CG7,FW,"center"),
-    ]:
-        sh(ws, R_BRK_GRP, c1, c2, lbl, bg=bg, fc=fc, sz=9, al=al)
+    # Breakdown group headers
+    ws.row_dimensions[R_BGH].height = 13
+    bkd_grps = [
+        (1,  1,  "INGREDIENT",        FW),
+        (2,  2,  "g NEEDED",          FPU),
+        (3,  7,  "PURCHASE ANALYSIS", FOR_),
+        (8,  10, "GRAMS",             FBL),
+        (11, 13, "$",                 FGR),
+    ]
+    for c1, c2, label, fc in bkd_grps:
+        if c1 != c2:
+            ws.merge_cells(start_row=R_BGH, start_column=c1, end_row=R_BGH, end_column=c2)
+        cell = ws.cell(row=R_BGH, column=c1, value=label)
+        cell.fill = _fill(CG8); cell.font = Font(name="Calibri", size=9, bold=True, color=fc)
+        cell.alignment = _align("center"); cell.border = _dark()
 
-    ws.row_dimensions[R_BRK_COL].height = 28
-    for col, lbl, bg, al in [
-        (1,"Ingredient Name",CG8,"left"),(2,"g Needed",CG7,"center"),
-        (3,"# MOQs",CG7,"center"),(4,"# PIs",CG7,"center"),
-        (5,"g to Buy",CG8,"center"),(6,"Leftover g",CG8,"center"),
-        (7,"Gram Util %",CG8,"center"),(8,"Purchased $",CG8,"center"),
-        (9,"Used $",CG8,"center"),(10,"Leftover $",CG8,"center"),
-        (11,"$ Util %",CG7,"center"),(12,"Cost / g",CG7,"center"),
-    ]:
-        c = ws.cell(row=R_BRK_COL, column=col, value=lbl)
-        sc(c, bg=bg, bold=True, al=al, fc=FW, sz=9)
-        c.alignment = Alignment(horizontal=al, vertical="center", wrap_text=True)
+    # Breakdown column headers
+    ws.row_dimensions[R_BCH].height = 32
+    bkd_cols = [
+        (1,  "Ingredient",   FW),
+        (2,  "g Needed",     FPU),
+        (3,  "# MOQ",        FOR_),
+        (4,  "# PI",         FOR_),
+        (5,  "Buy Qty",      FOR_),
+        (6,  "g to Buy",     FOR_),
+        (7,  "Purchased $",  FOR_),
+        (8,  "Used g",       FBL),
+        (9,  "Leftover g",   FBL),
+        (10, "Util %",       FBL),
+        (11, "Used $",       FGR),
+        (12, "Leftover $",   FGR),
+        (13, "$ Util %",     FGR),
+    ]
+    for col, label, fc in bkd_cols:
+        cell = ws.cell(row=R_BCH, column=col, value=label)
+        cell.fill = _fill(CG8); cell.font = Font(name="Calibri", size=9, bold=True, color=fc)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _dark()
 
+    # ── BREAKDOWN DATA ROWS ───────────────────────────────────
     for i in range(N):
-        ir  = R_ING_F + i
-        row = R_BRK_F + i
+        ir  = R_IF + i
+        row = R_BF + i
         ws.row_dimensions[row].height = 16
 
-        rBi=f"B{ir}"; rCi=f"C{ir}"; rFi=f"F{ir}"
-        rIi=f"I{ir}"; rJi=f"J{ir}"
+        mA = f"A{ir}"; mC = f"C{ir}"; mI = f"I{ir}"
+        mJ = f"J{ir}"; mL = f"L{ir}"; mM = f"M{ir}"
 
-        moq_gi = (f'IF({rCi}="lb",{rBi}*453.592,'
-                  f'IF({rCi}="oz",{rBi}*28.34952,'
-                  f'IF({rCi}="gal",{rBi}*3785.41,{rBi})))')
-        pi_g_safe = f'IF(ISNUMBER({rFi}),{rFi},0)'
+        pi_safe  = f"IF(ISNUMBER({mM}),{mM},0)"
+        g_needed = f"={mI}*{plan_u}"
+        n_moq    = "=1"
+        n_pi     = (f"=IFERROR(IF(OR({pi_safe}=0,{mL}>=B{row}),0,"
+                    f"CEILING((B{row}-{mL})/{pi_safe},1)),0)")
+        g_buy    = (f"=IF({pi_safe}=0,MAX(B{row},{mL}),"
+                    f"{mL}+D{row}*{pi_safe})")
+        buy_qty  = (f'=IFERROR(TEXT({_g2u(f"F{row}",mC)},"#,##0.####")&" "&{mC},"—")')
+        purch_d  = f"=F{row}*{mJ}"
+        used_g   = f"=B{row}"
+        lef_g_r  = f"=F{row}-B{row}"
+        gutil    = f"=IFERROR(B{row}/F{row},0)"
+        used_d   = f"=B{row}*{mJ}"
+        lef_d_r  = f"=G{row}-K{row}"
+        dutil    = f"=IFERROR(K{row}/G{row},0)"
 
-        for col, formula, bg, al, nf, fc in [
-            (1,  f"=A{ir}",                                                        CW,"left",  None,              FDK),
-            (2,  f"={rJi}*{plan_u}",                                               CW,"right", "#,##0.00",        FOR),
-            (3,  "=1",                                                             CW,"center","#,##0",            FDK),
-            (4,  f'=IFERROR(IF(OR({pi_g_safe}=0,{moq_gi}>=B{row}),0,'
-                 f'CEILING((B{row}-{moq_gi})/{pi_g_safe},1)),0)',                  CB,"center","#,##0",            FBL),
-            (5,  f'=IF({pi_g_safe}=0,MAX(B{row},{moq_gi}),'
-                 f'{moq_gi}+D{row}*{pi_g_safe})',                                  CO,"right", "#,##0.00",        FOR),
-            (6,  f"=E{row}-B{row}",                                                CW,"right", "#,##0.00",        FDK),
-            (7,  f"=IFERROR(B{row}/E{row},0)",                                     CW,"center","0.0%",            FDK),
-            (8,  f"=E{row}*{rIi}",                                                 CG,"right", '"$"#,##0.00',     FGR),
-            (9,  f"=B{row}*{rIi}",                                                 CG,"right", '"$"#,##0.00',     FGR),
-            (10, f"=H{row}-I{row}",                                                CW,"right", '"$"#,##0.00',     FRD),
-            (11, f"=IFERROR(I{row}/H{row},0)",                                     CW,"center","0.0%",            FDK),
-            (12, f"={rIi}",                                                        CW,"right", '"$"#,##0.000000', FG6),
-        ]:
-            c = ws.cell(row=row, column=col, value=formula)
-            sc(c, bg=bg, al=al, nf=nf, fc=fc)
+        _dat(ws, row, 1,  f"={mA}",  al="left",   fc=FDK)
+        _dat(ws, row, 2,  g_needed,  al="right",  nf=NF_DEC2)
+        _dat(ws, row, 3,  n_moq,     al="center", nf=NF_INT)
+        _dat(ws, row, 4,  n_pi,      al="center", nf=NF_INT)
+        # Buy Qty bold to match frontend fontWeight:700
+        bq = ws.cell(row=row, column=5, value=buy_qty)
+        bq.fill = _fill(CW); bq.font = Font(name="Calibri", size=11, bold=True, color=FDK)
+        bq.alignment = _align("right"); bq.border = _thin()
+        _dat(ws, row, 6,  g_buy,     al="right",  nf=NF_DEC2)
+        _dat(ws, row, 7,  purch_d,   al="right",  nf=NF_D2)
+        _dat(ws, row, 8,  used_g,    al="right",  nf=NF_DEC2)
+        _dat(ws, row, 9,  lef_g_r,   al="right",  nf=NF_DEC2)
+        _dat(ws, row, 10, gutil,     al="center", nf=NF_PCT1)
+        _dat(ws, row, 11, used_d,    al="right",  nf=NF_D2)
+        _dat(ws, row, 12, lef_d_r,   al="right",  nf=NF_D2)
+        _dat(ws, row, 13, dutil,     al="center", nf=NF_PCT1)
 
-    tr2 = R_BRK_T
-    ws.row_dimensions[tr2].height = 18
-    ws.merge_cells(start_row=tr2, start_column=1, end_row=tr2, end_column=4)
-    sc(ws.cell(row=tr2, column=1, value="TOTALS"), bg=CG1, bold=True, al="left")
-    for col, formula, nf, bg, fc in [
-        (5,  f"=SUM(E{bf}:E{bl})", "#,##0.00",    CO,  FOR),
-        (6,  f"=SUM(F{bf}:F{bl})", "#,##0.00",    CW,  FDK),
-        (7,  f"=IFERROR(SUM(B{bf}:B{bl})/E{tr2},0)","0.0%",CW,FDK),
-        (8,  f"=SUM(H{bf}:H{bl})", '"$"#,##0.00', CG,  FGR),
-        (9,  f"=SUM(I{bf}:I{bl})", '"$"#,##0.00', CG,  FGR),
-        (10, f"=SUM(J{bf}:J{bl})", '"$"#,##0.00', CW,  FRD),
-        (11, f"=IFERROR(I{tr2}/H{tr2},0)", "0.0%",CW,  FDK),
-        (12, "", None, CG1, FDK),
-    ]:
-        c = ws.cell(row=tr2, column=col, value=formula)
-        sc(c, bg=bg, bold=True, al="right", nf=nf, fc=fc)
+    # ── BREAKDOWN TOTALS ──────────────────────────────────────
+    ws.row_dimensions[R_BT].height = 17
+    _tot(ws, R_BT, 1,  "TOTALS",                                          al="left")
+    _tot(ws, R_BT, 2,  f"=SUM(B{bf}:B{bl})",                             nf=NF_DEC2)
+    _tot(ws, R_BT, 3,  ""); _tot(ws, R_BT, 4, ""); _tot(ws, R_BT, 5, "")
+    _tot(ws, R_BT, 6,  f"=SUM(F{bf}:F{bl})",                             nf=NF_DEC2)
+    _tot(ws, R_BT, 7,  f"=SUM(G{bf}:G{bl})",                             nf=NF_D2)
+    _tot(ws, R_BT, 8,  f"=SUM(H{bf}:H{bl})",                             nf=NF_DEC2)
+    _tot(ws, R_BT, 9,  f"=SUM(I{bf}:I{bl})",                             nf=NF_DEC2)
+    _tot(ws, R_BT, 10, f"=IFERROR(SUM(H{bf}:H{bl})/SUM(F{bf}:F{bl}),0)", nf=NF_PCT1)
+    _tot(ws, R_BT, 11, f"=SUM(K{bf}:K{bl})",                             nf=NF_D2)
+    _tot(ws, R_BT, 12, f"=SUM(L{bf}:L{bl})",                             nf=NF_D2)
+    _tot(ws, R_BT, 13, f"=IFERROR(SUM(K{bf}:K{bl})/SUM(G{bf}:G{bl}),0)", nf=NF_PCT1)
 
-    foot_row = tr2 + 2
-    ws.row_dimensions[foot_row].height = 14
-    ws.merge_cells(start_row=foot_row, start_column=1, end_row=foot_row, end_column=17)
-    fc2 = ws.cell(row=foot_row, column=1,
-                  value='="Raw Material Analysis Tool  ·  Generated: "&TEXT(TODAY(),"MMM D, YYYY")')
-    fc2.fill=fill(CG50); fc2.font=Font(name="Calibri",size=9,color="FF9CA3AF")
-    fc2.alignment=align("center"); fc2.border=thin_border()
-    ws.freeze_panes = f"B{R_ING_F}"
+    # ── FOOTER ────────────────────────────────────────────────
+    foot = R_BT + 2
+    ws.row_dimensions[foot].height = 13
+    ws.merge_cells(start_row=foot, start_column=1, end_row=foot, end_column=18)
+    fc_cell = ws.cell(row=foot, column=1,
+        value='="MOQ & Purchase Analysis Tool  ·  Generated: "&TEXT(TODAY(),"MMM D, YYYY")')
+    fc_cell.fill = _fill(CW)
+    fc_cell.font = Font(name="Calibri", size=9, color=FG5)
+    fc_cell.alignment = _align("center")
+    fc_cell.border = _thin()
+
     return wb
 
 
-# ── Export endpoint ────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# EXPORT ENDPOINT
+# ─────────────────────────────────────────────────────────────
 @app.route("/export", methods=["POST"])
 def export():
     data = request.get_json()
     raw  = data.get("anchorUtil") or data.get("dollarWt")
-    if raw is None:
-        anchor_util_pct = 95.0
-    else:
-        anchor_util_pct = float(raw)
-        if anchor_util_pct <= 1.0:
-            anchor_util_pct *= 100.0
+    aup  = 95.0 if raw is None else float(raw)
+    if aup <= 1.0: aup *= 100.0
 
     wb = build_excel(
         analysis_name   = data.get("analysisName", "Analysis"),
         sachet_grams    = float(data.get("sachetGrams",  0) or 0),
-        anchor_util_pct = anchor_util_pct,
+        anchor_util_pct = aup,
         what_if_units   = float(data.get("whatIfUnits",  0) or 0),
         ingredients     = data.get("ings", []),
     )
     buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
+    wb.save(buf); buf.seek(0)
     safe = re.sub(r'[^\w\s\-]', '_', data.get("analysisName") or "Analysis")
     return send_file(buf, as_attachment=True,
                      download_name=f"{safe}.xlsx",
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
-# ── SPA catch-all (serve React for any non-API route) ─────────────────────────
+# ─────────────────────────────────────────────────────────────
+# SPA CATCH-ALL
+# ─────────────────────────────────────────────────────────────
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_spa(path):
-    """Serve the React SPA for all non-API routes."""
     if not app.static_folder or not os.path.isdir(app.static_folder):
         abort(404)
     if path.startswith("api/") or path == "export":
@@ -607,5 +847,4 @@ def serve_spa(path):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5050))
-    debug = os.environ.get("FLASK_ENV") == "development"
     app.run(host="0.0.0.0", port=port, debug=True)
