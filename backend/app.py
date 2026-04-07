@@ -3,7 +3,7 @@ from flask_cors import CORS
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-import io, re, sqlite3, json, os
+import io, re, sqlite3, json, os, uuid
 from datetime import datetime
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
@@ -21,54 +21,126 @@ def init_db():
     conn = get_db()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS analyses (
-            id        TEXT PRIMARY KEY,
-            name      TEXT NOT NULL,
-            saved_at  TEXT NOT NULL,
-            is_draft  INTEGER NOT NULL DEFAULT 0,
-            data      TEXT NOT NULL
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            saved_at   TEXT NOT NULL,
+            is_draft   INTEGER NOT NULL DEFAULT 0,
+            data       TEXT NOT NULL,
+            folder_id  TEXT,
+            version    INTEGER NOT NULL DEFAULT 1
         )
     """)
-    try:
-        conn.execute("ALTER TABLE analyses ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0")
-    except Exception:
-        pass
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS folders (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        )
+    """)
+    for sql in [
+        "ALTER TABLE analyses ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE analyses ADD COLUMN folder_id TEXT",
+        "ALTER TABLE analyses ADD COLUMN version INTEGER NOT NULL DEFAULT 1",
+    ]:
+        try:
+            conn.execute(sql)
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
 init_db()
 
+
+def _apply_initials_suffix(name, initials):
+    base = (name or "").strip()
+    ini = (initials or "").strip().upper()
+    if not base:
+        return base
+    if not ini:
+        return base
+    suffix = f" - {ini}"
+    return base if base.endswith(suffix) else base + suffix
+
 @app.route("/api/analyses", methods=["GET"])
 def list_analyses():
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, name, saved_at, is_draft FROM analyses ORDER BY saved_at DESC"
+        "SELECT id, name, saved_at, is_draft, folder_id, version FROM analyses ORDER BY saved_at DESC"
     ).fetchall()
     conn.close()
     return jsonify([{"id": r["id"], "name": r["name"],
-                     "savedAt": r["saved_at"], "isDraft": bool(r["is_draft"])}
+                     "savedAt": r["saved_at"], "isDraft": bool(r["is_draft"]),
+                     "folderId": r["folder_id"], "version": r["version"]}
                     for r in rows])
+
+
+@app.route("/api/folders", methods=["GET"])
+def list_folders():
+    conn = get_db()
+    rows = conn.execute("SELECT id, name, created_at FROM folders ORDER BY name COLLATE NOCASE").fetchall()
+    conn.close()
+    return jsonify([{"id": r["id"], "name": r["name"], "createdAt": r["created_at"]} for r in rows])
+
+@app.route("/api/folders", methods=["POST"])
+def create_folder():
+    body = request.get_json() or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    fid = uuid.uuid4().hex
+    now = datetime.now().strftime("%b %d, %I:%M %p")
+    conn = get_db()
+    try:
+        conn.execute("INSERT INTO folders (id, name, created_at) VALUES (?, ?, ?)", (fid, name, now))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        row = conn.execute("SELECT id, name, created_at FROM folders WHERE lower(name)=lower(?)", (name,)).fetchone()
+        conn.close()
+        return jsonify({"id": row["id"], "name": row["name"], "createdAt": row["created_at"]})
+    conn.close()
+    return jsonify({"id": fid, "name": name, "createdAt": now})
 
 @app.route("/api/analyses", methods=["POST"])
 def save_analysis():
-    body     = request.get_json()
+    body     = request.get_json() or {}
     aid      = body.get("id", "").strip()
-    name     = body.get("name", "").strip()
+    raw_name = body.get("name", "").strip()
     data     = body.get("data", {})
+    initials = (body.get("initials") or data.get("initials") or "").strip().upper()
     is_draft = 1 if body.get("isDraft") else 0
-    if not aid or not name:
+    folder_id = body.get("folderId")
+    expected_version = body.get("expectedVersion")
+    force = bool(body.get("force"))
+    if not aid or not raw_name:
         return jsonify({"error": "id and name are required"}), 400
+
+    name = _apply_initials_suffix(raw_name, initials) if not is_draft else raw_name
     now = datetime.now().strftime("%b %d, %I:%M %p")
     conn = get_db()
+    row = conn.execute("SELECT version, saved_at, is_draft, folder_id FROM analyses WHERE id=?", (aid,)).fetchone()
+    current_version = row["version"] if row else 0
+    if row and expected_version is not None and int(expected_version) != int(current_version) and not force:
+        conn.close()
+        return jsonify({"error": "version_conflict", "currentVersion": current_version, "savedAt": row["saved_at"]}), 409
+
+    if row and not row["is_draft"] and is_draft:
+        is_draft = 0
+        name = row["folder_id"] and name or name
+
+    effective_folder_id = folder_id if folder_id is not None else (row["folder_id"] if row else None)
+    new_version = current_version + 1 if row else 1
     conn.execute("""
-        INSERT INTO analyses (id, name, saved_at, is_draft, data)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO analyses (id, name, saved_at, is_draft, data, folder_id, version)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             name=excluded.name, saved_at=excluded.saved_at,
-            is_draft=excluded.is_draft, data=excluded.data
-    """, (aid, name, now, is_draft, json.dumps(data)))
+            is_draft=excluded.is_draft, data=excluded.data,
+            folder_id=excluded.folder_id, version=excluded.version
+    """, (aid, name, now, is_draft, json.dumps(data), effective_folder_id, new_version))
     conn.commit()
     conn.close()
-    return jsonify({"id": aid, "name": name, "savedAt": now, "isDraft": bool(is_draft)})
+    return jsonify({"id": aid, "name": name, "savedAt": now, "isDraft": bool(is_draft), "folderId": effective_folder_id, "version": new_version})
 
 @app.route("/api/analyses/<aid>", methods=["GET"])
 def load_analysis(aid):
@@ -78,7 +150,29 @@ def load_analysis(aid):
     if not row:
         return jsonify({"error": "Not found"}), 404
     return jsonify({"id": row["id"], "name": row["name"], "savedAt": row["saved_at"],
-                    "isDraft": bool(row["is_draft"]), "data": json.loads(row["data"])})
+                    "isDraft": bool(row["is_draft"]), "folderId": row["folder_id"], "version": row["version"],
+                    "data": json.loads(row["data"])})
+
+
+@app.route("/api/analyses/<aid>/folder", methods=["PATCH"])
+def move_analysis_folder(aid):
+    body = request.get_json() or {}
+    folder_id = body.get("folderId")
+    now = datetime.now().strftime("%b %d, %I:%M %p")
+    conn = get_db()
+    row = conn.execute("SELECT id FROM analyses WHERE id=?", (aid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "Not found"}), 404
+    if folder_id is not None:
+        frow = conn.execute("SELECT id FROM folders WHERE id=?", (folder_id,)).fetchone()
+        if not frow:
+            conn.close()
+            return jsonify({"error": "Folder not found"}), 404
+    conn.execute("UPDATE analyses SET folder_id=?, saved_at=? WHERE id=?", (folder_id, now, aid))
+    conn.commit()
+    conn.close()
+    return jsonify({"id": aid, "folderId": folder_id, "savedAt": now})
 
 @app.route("/api/analyses/<aid>", methods=["DELETE"])
 def delete_analysis(aid):
@@ -229,7 +323,7 @@ def _g2u(grams, unit_ref):
 #  R(18) Elig Y/N                  — user input (yellow, center)
 # ═════════════════════════════════════════════════════════════
 
-def build_excel(analysis_name, sachet_grams, anchor_util_pct, what_if_units, ingredients):
+def build_excel(analysis_name, unit_weight_g, root_sku, anchor_util_pct, what_if_units, ingredients):
     wb = Workbook()
     ws = wb.active
     ws.title = "RM Analysis"
@@ -263,8 +357,9 @@ def build_excel(analysis_name, sachet_grams, anchor_util_pct, what_if_units, ing
     R_LEGEND= 2
     R_S1    = 4
     R_SG    = 5
-    R_AU    = 6
-    R_S2    = 8
+    R_ROOT  = 6
+    R_AU    = 7
+    R_S2    = 9
     R_KH    = 9
     R_KV    = 10
     R_KS    = 11
@@ -323,7 +418,8 @@ def build_excel(analysis_name, sachet_grams, anchor_util_pct, what_if_units, ing
     _sec(ws, R_S1, 1, 18, "  SECTION 1 — Scenario Parameters")
 
     for row, label, value, nf in [
-        (R_SG, "Sachet Grams (g)",        sachet_grams,        NF_DEC2),
+        (R_SG, "Unit Weight (g)",         unit_weight_g,        NF_DEC2),
+        (R_ROOT, "Root SKU",              root_sku,              None),
         (R_AU, "Anchor Utilization (%)",  anchor_util_pct/100, NF_PCT),
     ]:
         ws.row_dimensions[row].height = 18
@@ -519,7 +615,7 @@ def build_excel(analysis_name, sachet_grams, anchor_util_pct, what_if_units, ing
         _inp(ws, row, 18, elig,    al="center")
 
         # White computed cells
-        # g/Unit = sachet_g × formula%
+        # g/Unit = unit_weight_g × formula%
         _dat(ws, row, 9,  f"={SG}*{H}", nf=NF_DEC3)
         # Cost/g = cost_per_cost_unit / grams_per_cost_unit
         _dat(ws, row, 10, f"=IFERROR({F}/{_u2g('1',G)},0)", nf=NF_D6)
@@ -552,7 +648,7 @@ def build_excel(analysis_name, sachet_grams, anchor_util_pct, what_if_units, ing
     tc.alignment = _align("left"); tc.border = _thin()
 
     _tot(ws, R_IT, 8,  f"=SUM(H{fr}:H{lr})", fc=FGR,  nf=NF_PCT)   # pct sum — green if 100
-    _tot(ws, R_IT, 9,  f"={SG}",              fc=FDK,  nf=NF_G2)    # sachet grams
+    _tot(ws, R_IT, 9,  f"={SG}",              fc=FDK,  nf=NF_G2)    # unit weight grams
     _tot(ws, R_IT, 10, "",      nf=None)
     _tot(ws, R_IT, 11, f"=SUM(K{fr}:K{lr})", fc=FDK,  nf=NF_D4)    # cost/unit sum
     _tot(ws, R_IT, 12, "",      nf=None)
@@ -813,7 +909,8 @@ def export():
 
     wb = build_excel(
         analysis_name   = data.get("analysisName", "Analysis"),
-        sachet_grams    = float(data.get("sachetGrams",  0) or 0),
+        unit_weight_g   = float(data.get("unitWeightG", data.get("sachetGrams", 0)) or 0),
+        root_sku        = data.get("rootSKU", ""),
         anchor_util_pct = aup,
         what_if_units   = float(data.get("whatIfUnits",  0) or 0),
         ingredients     = data.get("ings", []),
